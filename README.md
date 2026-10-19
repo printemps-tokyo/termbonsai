@@ -62,13 +62,13 @@ termbonsai --at +30d --watered   # how it will look in 30 days, if you keep wate
 | `show` (default) | Draw the tree and how it is doing. The first run plants one. |
 | `water` | Water it. Watering soil that is still moist (90% or more) does nothing. |
 | `plant` | Plant a new tree; `--seed N` for a given shape, `--name NAME`; `--force` replaces a living tree. |
-| `grow` | Replay its growth from a sprout to today (an animation on a terminal). |
+| `grow` | Replay its growth from a sprout to today (an animation on a terminal; it clears the screen). |
 | `line` | One line, like `Momiji 12d water 64% ok`; `--tmux` adds tmux colors. |
 | `status` | Its state as JSON. |
 
 | Option | Description | Default |
 | --- | --- | --- |
-| `--at OFFSET` | Show it at another time, like `+30d`, `+12h` or `-2d`; nothing is saved | |
+| `--at OFFSET` | Show it at a later time, like `+30d` or `+12h`; nothing is saved (the tree keeps no history, so it cannot look back) | |
 | `--watered` | With `--at`: as if watered all along | |
 | `--season S` | `auto`, `spring`, `summer`, `autumn` or `winter` | `auto` (the month) |
 | `--south` | Southern hemisphere seasons | |
@@ -81,8 +81,8 @@ termbonsai --at +30d --watered   # how it will look in 30 days, if you keep wate
 
 - A full watering keeps the soil wet for 3 days; the soil dries steadily.
 - It grows only while the soil is wet: one day of growth per day of wet soil.
-  A tree is full grown after a few weeks to a couple of months, depending on
-  its shape.
+  A tree fills out after about a month of wet soil (27 to 46 days, depending on
+  its shape); forgotten days do not count.
 - Below 25% water it is thirsty. Dry for 4 days, it starts to drop its leaves;
   dry for 10 days, it dies. Watering a dry or wilting tree brings it back with
   all its growth.
@@ -107,8 +107,11 @@ and red when it is wilting or dead (tmux interprets the `#[fg=...]` codes in
 ## The state file
 
 `--state PATH`, or `TERMBONSAI_STATE`, or `$XDG_STATE_HOME/termbonsai/bonsai`,
-or `~/.local/state/termbonsai/bonsai`. It is plain text (`key=value` lines) and
-written atomically. To keep a tree on another machine, copy the file.
+or `~/.local/state/termbonsai/bonsai`. It is plain text (`key=value` lines).
+A save writes a new temporary file and renames it into place, and a lock file
+next to it keeps two termbonsai from changing the tree at once. A file that
+cannot be read is reported; `termbonsai plant --force` starts over. To keep a
+tree on another machine, copy the file.
 
 ## Credits
 

@@ -31,6 +31,8 @@ jobs:
         with:
           targets: ${{ matrix.target }}
       - uses: Swatinem/rust-cache@v2
+      # A release is built only from code whose tests pass.
+      - run: cargo test --all
       - run: cargo build --release --target ${{ matrix.target }}
       - name: Package
         shell: bash

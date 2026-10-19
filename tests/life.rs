@@ -133,3 +133,47 @@ fn the_same_seed_grows_the_same_tree() {
             .all(|p| p.born > first_wood));
     }
 }
+
+#[test]
+fn state_files_that_do_not_fit_together_are_refused() {
+    let s = State::plant(1, "x", T0).at(T0 + 100 * HOUR);
+    let good = s.to_text();
+    assert!(State::from_text(&good).is_ok());
+    let dry = s.dry_since.unwrap();
+    for (from, to) in [
+        // A dry time in the future, or before planting.
+        (
+            format!("dry_since={dry}"),
+            format!("dry_since={}", T0 + 1000 * HOUR),
+        ),
+        (
+            format!("dry_since={dry}"),
+            format!("dry_since={}", T0 - HOUR),
+        ),
+        // Dry soil without a dry time.
+        (format!("dry_since={dry}\n"), String::new()),
+        // Times far outside 1900-2400.
+        (
+            format!("planted_at={T0}"),
+            format!("planted_at={}", i64::MIN),
+        ),
+        // More growth than days alive.
+        (format!("growth={}", s.growth), "growth=500".to_string()),
+        // A missing count.
+        (format!("waterings={}", s.waterings), String::new()),
+    ] {
+        let text = good.replace(&from, &to);
+        assert_ne!(text, good, "{from}");
+        assert!(State::from_text(&text).is_err(), "{to}");
+    }
+    let twice = format!("{good}seed=9\n");
+    assert!(State::from_text(&twice)
+        .unwrap_err()
+        .contains("appears twice"));
+}
+
+#[test]
+fn a_tree_takes_about_a_month_to_fill_out() {
+    let days: Vec<f64> = (0..300).map(|seed| full_grown(&grow(seed))).collect();
+    assert!(days.iter().all(|d| (25.0..50.0).contains(d)), "{days:?}");
+}

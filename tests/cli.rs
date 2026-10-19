@@ -151,3 +151,95 @@ fn usage_errors_exit_2() {
     assert_eq!(code, 2);
     assert!(err.contains("plant --force starts over"), "{err}");
 }
+
+#[test]
+fn a_corrupt_state_can_be_replaced() {
+    let g = Garden::new("corrupt");
+    std::fs::write(g.dir.join("bonsai"), "garbage").unwrap();
+    assert_eq!(g.run(T0, &["plant"]).0, 2, "not without --force");
+    let (code, out, err) = g.run(T0, &["plant", "--force", "--seed", "4", "--name", "Ume"]);
+    assert_eq!(code, 0, "{err}");
+    assert!(out.starts_with("Ume is planted."));
+    std::fs::write(g.dir.join("bonsai"), [0xff, 0xfe, 0x00]).unwrap();
+    assert_eq!(
+        g.run(T0, &["plant", "--force"]).0,
+        0,
+        "even when it is not text"
+    );
+}
+
+#[test]
+fn previews_of_a_tree_not_yet_planted_save_nothing() {
+    let g = Garden::new("noplant");
+    let (code, out, _) = g.run(T0, &["--at", "+10d", "--watered"]);
+    assert_eq!(code, 0);
+    assert!(out.contains("not yet planted; nothing was saved"), "{out}");
+    assert!(!g.dir.join("bonsai").exists());
+    assert_eq!(g.run(T0, &["water"]).0, 2, "nothing to water yet");
+}
+
+#[test]
+fn bad_offsets_and_times_are_usage_errors() {
+    let g = Garden::new("times");
+    for at in [
+        "-2d",
+        "日",
+        "+9223372036854775807h",
+        "-9223372036854775808h",
+        "+36501d",
+        "d",
+    ] {
+        let (code, _, err) = g.run(T0, &["--at", at]);
+        assert_eq!(code, 2, "{at}: {err}");
+    }
+    let (code, _, err) = g.run(i64::MIN / 2, &[]);
+    assert_eq!(code, 2);
+    assert!(err.contains("1900 to 2400"), "{err}");
+}
+
+#[test]
+fn paths_in_errors_are_escaped() {
+    let g = Garden::new("escape");
+    let evil = g.dir.join("a\x1b[2Jb").join("x").join("bonsai");
+    std::fs::write(g.dir.join("a\x1b[2Jb"), "a file, not a directory").unwrap();
+    let out = Command::new(env!("CARGO_BIN_EXE_termbonsai"))
+        .args(["plant", "--state", evil.to_str().unwrap()])
+        .env("TERMBONSAI_NOW", T0.to_string())
+        .output()
+        .unwrap();
+    let err = String::from_utf8(out.stderr).unwrap();
+    assert_eq!(out.status.code(), Some(2));
+    assert!(!err.contains('\x1b'), "{err:?}");
+}
+
+#[test]
+fn many_waterings_at_once_leave_a_good_file() {
+    let g = Garden::new("race");
+    g.run(T0, &["plant", "--seed", "5"]);
+    let children: Vec<_> = (0..8)
+        .map(|i| {
+            Command::new(env!("CARGO_BIN_EXE_termbonsai"))
+                .args(["water"])
+                .env("TERMBONSAI_STATE", g.dir.join("bonsai"))
+                .env("TERMBONSAI_NOW", (T0 + 50 * 3_600 + i).to_string())
+                .output()
+        })
+        .collect();
+    for c in children {
+        assert!(c.unwrap().status.success());
+    }
+    let (_, json, _) = g.run(T0 + 50 * 3_600 + 10, &["status"]);
+    assert!(
+        json.contains("\"waterings\":1"),
+        "one watering counts, the rest find moist soil: {json}"
+    );
+    let leftovers: Vec<_> = std::fs::read_dir(&g.dir)
+        .unwrap()
+        .map(|e| e.unwrap().file_name())
+        .collect();
+    assert_eq!(
+        leftovers.len(),
+        1,
+        "no temporary or lock files left: {leftovers:?}"
+    );
+}

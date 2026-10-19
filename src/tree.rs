@@ -26,7 +26,12 @@ pub struct Part {
     pub tag: u64,
 }
 
-/// Days between two trunk steps, and between two branch steps.
+/// Stretches every appearance time, so a tree takes about a month of wet
+/// soil to fill out (between about 27 and 46 days, by seed).
+pub const GROWTH_SCALE: f64 = 2.5;
+
+/// Days between two trunk steps, and between two branch steps (before
+/// `GROWTH_SCALE`).
 const TRUNK_STEP: f64 = 0.6;
 const BRANCH_STEP: f64 = 0.45;
 
@@ -52,7 +57,7 @@ impl Grower {
             y,
             ch,
             kind,
-            born,
+            born: born * GROWTH_SCALE,
             tag,
         });
     }
