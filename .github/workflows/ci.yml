@@ -1,0 +1,47 @@
+name: CI
+
+on:
+  push:
+    branches: [main]
+  pull_request:
+
+permissions:
+  contents: read
+
+env:
+  CARGO_TERM_COLOR: always
+
+jobs:
+  test:
+    runs-on: ${{ matrix.os }}
+    strategy:
+      fail-fast: false
+      matrix:
+        os: [ubuntu-latest, macos-latest]
+    steps:
+      - uses: actions/checkout@v7
+      - uses: dtolnay/rust-toolchain@stable
+        with:
+          components: rustfmt, clippy
+      - uses: Swatinem/rust-cache@v2
+      - run: cargo fmt --all -- --check
+      - run: cargo clippy --all-targets -- -D warnings
+      - run: cargo test --all
+      - run: cargo build --release
+      # A whole life in a moment: plant, look, water, and a JSON status that parses.
+      - name: A life
+        run: |
+          export TERMBONSAI_STATE="$RUNNER_TEMP/bonsai" TERMBONSAI_NOW=1792000000
+          b=./target/release/termbonsai
+          $b plant --seed 7 --name Momiji
+          $b --at +60d --watered
+          $b water
+          $b line --tmux
+          $b status | python3 -m json.tool > /dev/null
+
+  msrv:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v7
+      - uses: dtolnay/rust-toolchain@1.82
+      - run: cargo test --all
