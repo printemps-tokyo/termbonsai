@@ -216,17 +216,20 @@ fn paths_in_errors_are_escaped() {
 fn many_waterings_at_once_leave_a_good_file() {
     let g = Garden::new("race");
     g.run(T0, &["plant", "--seed", "5"]);
+    // All started before any is waited for, so they contend for the lock.
     let children: Vec<_> = (0..8)
         .map(|i| {
             Command::new(env!("CARGO_BIN_EXE_termbonsai"))
                 .args(["water"])
                 .env("TERMBONSAI_STATE", g.dir.join("bonsai"))
                 .env("TERMBONSAI_NOW", (T0 + 50 * 3_600 + i).to_string())
-                .output()
+                .stdout(std::process::Stdio::null())
+                .spawn()
+                .unwrap()
         })
         .collect();
-    for c in children {
-        assert!(c.unwrap().status.success());
+    for mut c in children {
+        assert!(c.wait().unwrap().success());
     }
     let (_, json, _) = g.run(T0 + 50 * 3_600 + 10, &["status"]);
     assert!(
@@ -242,4 +245,38 @@ fn many_waterings_at_once_leave_a_good_file() {
         1,
         "no temporary or lock files left: {leftovers:?}"
     );
+}
+
+#[test]
+fn a_state_file_named_like_a_lock_is_safe() {
+    let g = Garden::new("lockname");
+    let path = g.dir.join("bonsai.lock");
+    let run = |args: &[&str]| {
+        Command::new(env!("CARGO_BIN_EXE_termbonsai"))
+            .args(args)
+            .args(["--state", path.to_str().unwrap()])
+            .env("TERMBONSAI_NOW", T0.to_string())
+            .output()
+            .unwrap()
+    };
+    assert!(run(&["plant", "--seed", "1"]).status.success());
+    assert!(path.exists(), "the state file survives its own save");
+    assert!(run(&["plant", "--force", "--seed", "2"]).status.success());
+    assert!(std::fs::read_to_string(&path).unwrap().contains("seed=2"));
+}
+
+#[cfg(unix)]
+#[test]
+fn force_replaces_a_file_that_cannot_be_read() {
+    use std::os::unix::fs::PermissionsExt;
+    let g = Garden::new("unreadable");
+    let path = g.dir.join("bonsai");
+    std::fs::write(&path, "x").unwrap();
+    std::fs::set_permissions(&path, std::fs::Permissions::from_mode(0o000)).unwrap();
+    if std::fs::read(&path).is_ok() {
+        return; // running as root: permissions do not stop reading
+    }
+    assert_eq!(g.run(T0, &["plant"]).0, 2);
+    assert_eq!(g.run(T0, &["plant", "--force", "--seed", "3"]).0, 0);
+    assert!(std::fs::read_to_string(&path).unwrap().contains("seed=3"));
 }

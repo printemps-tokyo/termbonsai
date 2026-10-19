@@ -163,7 +163,7 @@ impl State {
                 .split_once('=')
                 .ok_or_else(|| format!("bad line {line:?}"))?;
             if get.insert(k.to_string(), v.to_string()).is_some() {
-                return Err(format!("{k} appears twice"));
+                return Err(format!("{k:?} appears twice"));
             }
         }
         fn num<T: std::str::FromStr>(

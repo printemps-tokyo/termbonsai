@@ -277,24 +277,45 @@ fn load(path: &Path) -> Result<Load, String> {
 }
 
 /// Exclusive use of the state file while it is read and written, through a
-/// lock file next to it. A lock left behind by a crash is taken over after
-/// 30 seconds.
-struct Lock(PathBuf);
+/// lock file next to it (the state file's name plus ".lock"). The lock holds
+/// a token of its own; a lock older than 30 seconds, left by a crash, is
+/// taken over by renaming it away, which only one process can do, and a
+/// lock is removed on release only while it still holds our token.
+struct Lock {
+    path: PathBuf,
+    token: String,
+}
+
+fn lock_path(path: &Path) -> PathBuf {
+    let mut name = path
+        .file_name()
+        .map_or_else(|| "bonsai".into(), |n| n.to_os_string());
+    name.push(".lock");
+    path.with_file_name(name)
+}
 
 impl Lock {
     fn take(path: &Path) -> Result<Lock, String> {
-        let lock = path.with_extension("lock");
+        let lock = lock_path(path);
         if let Some(dir) = lock.parent().filter(|d| !d.as_os_str().is_empty()) {
             std::fs::create_dir_all(dir)
                 .map_err(|e| format!("cannot create {}: {e}", shown(dir)))?;
         }
-        for _ in 0..150 {
+        let nanos = SystemTime::now()
+            .duration_since(UNIX_EPOCH)
+            .map_or(0, |d| d.as_nanos());
+        let token = format!("{} {nanos}", std::process::id());
+        for attempt in 0..150u32 {
             match std::fs::OpenOptions::new()
                 .write(true)
                 .create_new(true)
                 .open(&lock)
             {
-                Ok(_) => return Ok(Lock(lock)),
+                Ok(mut f) => {
+                    f.write_all(token.as_bytes())
+                        .map_err(|e| format!("cannot lock {}: {e}", shown(&lock)))?;
+                    return Ok(Lock { path: lock, token });
+                }
                 Err(e) if e.kind() == std::io::ErrorKind::AlreadyExists => {
                     let stale = std::fs::metadata(&lock)
                         .and_then(|m| m.modified())
@@ -302,7 +323,13 @@ impl Lock {
                         .and_then(|t| t.elapsed().ok())
                         .is_some_and(|age| age > Duration::from_secs(30));
                     if stale {
-                        let _ = std::fs::remove_file(&lock);
+                        // Rename, not remove: of several processes finding the
+                        // same stale lock, exactly one moves it away.
+                        let aside =
+                            lock.with_extension(format!("stale.{}.{attempt}", std::process::id()));
+                        if std::fs::rename(&lock, &aside).is_ok() {
+                            let _ = std::fs::remove_file(&aside);
+                        }
                     } else {
                         std::thread::sleep(Duration::from_millis(20));
                     }
@@ -319,7 +346,9 @@ impl Lock {
 
 impl Drop for Lock {
     fn drop(&mut self) {
-        let _ = std::fs::remove_file(&self.0);
+        if std::fs::read_to_string(&self.path).is_ok_and(|t| t == self.token) {
+            let _ = std::fs::remove_file(&self.path);
+        }
     }
 }
 
@@ -457,7 +486,12 @@ fn run(a: Args) -> Result<ExitCode, String> {
 
     if a.command == "plant" {
         let _lock = Lock::take(&path)?;
-        match load(&path)? {
+        // With --force even a file that cannot be read at all is replaced.
+        let existing = match load(&path) {
+            Err(_) if a.force => Load::Missing,
+            other => other?,
+        };
+        match existing {
             Load::Tree(old) if old.at(now).health() != Health::Dead && !a.force => {
                 return Err(format!(
                     "{} is still alive; termbonsai plant --force replaces it",
