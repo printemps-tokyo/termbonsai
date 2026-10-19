@@ -276,15 +276,12 @@ fn load(path: &Path) -> Result<Load, String> {
     }
 }
 
-/// Exclusive use of the state file while it is read and written, through a
-/// lock file next to it (the state file's name plus ".lock"). The lock holds
-/// a token of its own; a lock older than 30 seconds, left by a crash, is
-/// taken over by renaming it away, which only one process can do, and a
-/// lock is removed on release only while it still holds our token.
-struct Lock {
-    path: PathBuf,
-    token: String,
-}
+/// Exclusive use of the state file while it is read and written: an
+/// operating-system lock (flock on Unix, LockFileEx on Windows) on a file
+/// next to it, the state file's name plus ".lock". The lock belongs to the
+/// process holding it, so it is released when that process ends, even by a
+/// crash, and the lock file itself is never removed or replaced.
+struct Lock(#[allow(dead_code)] std::fs::File);
 
 fn lock_path(path: &Path) -> PathBuf {
     let mut name = path
@@ -301,54 +298,28 @@ impl Lock {
             std::fs::create_dir_all(dir)
                 .map_err(|e| format!("cannot create {}: {e}", shown(dir)))?;
         }
-        let nanos = SystemTime::now()
-            .duration_since(UNIX_EPOCH)
-            .map_or(0, |d| d.as_nanos());
-        let token = format!("{} {nanos}", std::process::id());
-        for attempt in 0..150u32 {
-            match std::fs::OpenOptions::new()
-                .write(true)
-                .create_new(true)
-                .open(&lock)
-            {
-                Ok(mut f) => {
-                    f.write_all(token.as_bytes())
-                        .map_err(|e| format!("cannot lock {}: {e}", shown(&lock)))?;
-                    return Ok(Lock { path: lock, token });
+        let file = std::fs::OpenOptions::new()
+            .create(true)
+            .write(true)
+            .truncate(false)
+            .open(&lock)
+            .map_err(|e| format!("cannot open {}: {e}", shown(&lock)))?;
+        // Wait up to about 3 seconds for another termbonsai to finish.
+        for _ in 0..150 {
+            match file.try_lock() {
+                Ok(()) => return Ok(Lock(file)),
+                Err(std::fs::TryLockError::WouldBlock) => {
+                    std::thread::sleep(Duration::from_millis(20))
                 }
-                Err(e) if e.kind() == std::io::ErrorKind::AlreadyExists => {
-                    let stale = std::fs::metadata(&lock)
-                        .and_then(|m| m.modified())
-                        .ok()
-                        .and_then(|t| t.elapsed().ok())
-                        .is_some_and(|age| age > Duration::from_secs(30));
-                    if stale {
-                        // Rename, not remove: of several processes finding the
-                        // same stale lock, exactly one moves it away.
-                        let aside =
-                            lock.with_extension(format!("stale.{}.{attempt}", std::process::id()));
-                        if std::fs::rename(&lock, &aside).is_ok() {
-                            let _ = std::fs::remove_file(&aside);
-                        }
-                    } else {
-                        std::thread::sleep(Duration::from_millis(20));
-                    }
+                Err(std::fs::TryLockError::Error(e)) => {
+                    return Err(format!("cannot lock {}: {e}", shown(&lock)))
                 }
-                Err(e) => return Err(format!("cannot lock {}: {e}", shown(&lock))),
             }
         }
         Err(format!(
-            "{} is locked by another termbonsai; try again",
+            "{} is in use by another termbonsai; try again",
             shown(path)
         ))
-    }
-}
-
-impl Drop for Lock {
-    fn drop(&mut self) {
-        if std::fs::read_to_string(&self.path).is_ok_and(|t| t == self.token) {
-            let _ = std::fs::remove_file(&self.path);
-        }
     }
 }
 

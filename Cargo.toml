@@ -2,7 +2,7 @@
 name = "termbonsai"
 version = "0.1.0"
 edition = "2021"
-rust-version = "1.82"
+rust-version = "1.89"
 license = "MIT"
 description = "A bonsai that lives in your terminal: it grows while you keep it watered, wilts when you forget, follows the seasons, and fits in a tmux status line. Zero-dependency Rust CLI."
 authors = ["printemps.tokyo <develop@printemps.tokyo>"]

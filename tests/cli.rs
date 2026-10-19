@@ -236,14 +236,15 @@ fn many_waterings_at_once_leave_a_good_file() {
         json.contains("\"waterings\":1"),
         "one watering counts, the rest find moist soil: {json}"
     );
-    let leftovers: Vec<_> = std::fs::read_dir(&g.dir)
+    let mut left: Vec<String> = std::fs::read_dir(&g.dir)
         .unwrap()
-        .map(|e| e.unwrap().file_name())
+        .map(|e| e.unwrap().file_name().to_string_lossy().into_owned())
         .collect();
+    left.sort();
     assert_eq!(
-        leftovers.len(),
-        1,
-        "no temporary or lock files left: {leftovers:?}"
+        left,
+        vec!["bonsai", "bonsai.lock"],
+        "no temporary files left"
     );
 }
 

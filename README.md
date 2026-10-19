@@ -35,7 +35,7 @@ drawn in 24-bit color where the terminal supports it.
 
 ## Install
 
-From source, with a Rust toolchain 1.82 or later (https://rustup.rs):
+From source, with a Rust toolchain 1.89 or later (https://rustup.rs):
 
 ```bash
 cargo install --git https://github.com/printemps-tokyo/termbonsai
@@ -108,8 +108,10 @@ and red when it is wilting or dead (tmux interprets the `#[fg=...]` codes in
 
 `--state PATH`, or `TERMBONSAI_STATE`, or `$XDG_STATE_HOME/termbonsai/bonsai`,
 or `~/.local/state/termbonsai/bonsai`. It is plain text (`key=value` lines).
-A save writes a new temporary file and renames it into place, and a lock file
-next to it keeps two termbonsai from changing the tree at once. A file that
+A save writes a new temporary file and renames it into place, and an
+operating-system lock on a file next to it (`bonsai.lock`) keeps two termbonsai
+from changing the tree at once; the lock ends with the process, even a crashed
+one. A file that
 cannot be read is reported; `termbonsai plant --force` starts over. To keep a
 tree on another machine, copy the file.
 
