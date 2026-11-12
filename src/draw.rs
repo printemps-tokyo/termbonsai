@@ -3,8 +3,8 @@
 
 use std::fmt::Write as _;
 
-use crate::state::{Health, State, DAY};
-use crate::tree::{Kind, Part};
+use crate::state::{Health, State, Trim, DAY};
+use crate::tree::{Kind, Part, Species};
 
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub enum Lang {
@@ -125,15 +125,56 @@ const DEAD_WOOD: Rgb = Rgb(0x80, 0x78, 0x70);
 const POT: Rgb = Rgb(0xb5, 0x5d, 0x3a);
 const SPROUT: Rgb = Rgb(0x7c, 0xc8, 0x4a);
 
-/// How a leaf looks (or None when it is not there) for the season and health.
-fn leaf(p: &Part, season: Season, health: Health) -> Option<(char, Rgb)> {
+/// How a leaf looks (or None when it is not there) for the species, season
+/// and health.
+fn leaf(p: &Part, species: Species, season: Season, health: Health) -> Option<(char, Rgb)> {
     let roll = (p.tag % 1000) as f64 / 1000.0;
+    // Pine needles are drawn as ^, every other leaf as &.
+    let ch = if species == Species::Pine { '^' } else { '&' };
     match health {
         Health::Dead => return None,
         Health::Wilting if roll < 0.55 => return None,
-        Health::Wilting => return Some(('&', Rgb(0x9c, 0x8a, 0x3c))),
-        Health::Dry => return Some(('&', Rgb(0xb5, 0xa6, 0x42))),
+        Health::Wilting => return Some((ch, Rgb(0x9c, 0x8a, 0x3c))),
+        Health::Dry => return Some((ch, Rgb(0xb5, 0xa6, 0x42))),
         _ => {}
+    }
+    match species {
+        Species::Classic => {}
+        Species::Pine => {
+            // Evergreen: new candles in spring, a little bronze in autumn,
+            // dark green all winter.
+            return Some(match season {
+                Season::Spring if roll < 0.3 => ('^', Rgb(0x8c, 0xc8, 0x5a)),
+                Season::Autumn if roll < 0.15 => ('^', Rgb(0x7a, 0x7a, 0x3a)),
+                Season::Winter => ('^', Rgb(0x2f, 0x5a, 0x3c)),
+                _ => ('^', Rgb(0x2e, 0x6b, 0x3a)),
+            });
+        }
+        Species::Maple => {
+            return match season {
+                Season::Spring if roll < 0.2 => Some(('&', Rgb(0xc0, 0x50, 0x4a))),
+                Season::Spring => Some(('&', Rgb(0x8f, 0xcf, 0x5a))),
+                Season::Summer => Some(('&', Rgb(0x2e, 0x8b, 0x3a))),
+                Season::Autumn if roll < 0.55 => Some(('&', Rgb(0xc8, 0x30, 0x2a))),
+                Season::Autumn if roll < 0.85 => Some(('&', Rgb(0xe0, 0x50, 0x2a))),
+                Season::Autumn => Some(('&', Rgb(0xe0, 0x7b, 0x24))),
+                // Bare, a few dry leaves hanging on.
+                Season::Winter if roll < 0.1 => Some(('&', Rgb(0x8a, 0x5a, 0x3a))),
+                Season::Winter => None,
+            };
+        }
+        Species::Cherry => {
+            return match season {
+                Season::Spring if roll < 0.5 => Some(('*', Rgb(0xf7, 0xb6, 0xd2))),
+                Season::Spring if roll < 0.8 => Some(('*', Rgb(0xff, 0xdc, 0xe9))),
+                Season::Spring => Some(('&', Rgb(0x8f, 0xcf, 0x5a))),
+                Season::Summer => Some(('&', Rgb(0x3a, 0x8b, 0x3a))),
+                Season::Autumn if roll < 0.5 => Some(('&', Rgb(0xe0, 0x90, 0x2a))),
+                Season::Autumn if roll < 0.8 => Some(('&', Rgb(0xc8, 0x50, 0x2a))),
+                Season::Autumn => Some(('&', Rgb(0xe8, 0xb9, 0x23))),
+                Season::Winter => None,
+            };
+        }
     }
     Some(match season {
         Season::Spring if roll < 0.35 => ('*', Rgb(0xf5, 0xa3, 0xc7)),
@@ -147,8 +188,8 @@ fn leaf(p: &Part, season: Season, health: Health) -> Option<(char, Rgb)> {
     })
 }
 
-/// The tree at `growth` days, its pot below, as lines of colored text,
-/// `width` columns wide.
+/// The classic tree at `growth` days, its pot below, as lines of colored
+/// text, `width` columns wide.
 pub fn picture(
     parts: &[Part],
     growth: f64,
@@ -157,20 +198,53 @@ pub fn picture(
     width: usize,
     mode: ColorMode,
 ) -> Vec<String> {
+    picture_of(
+        parts,
+        growth,
+        season,
+        health,
+        width,
+        mode,
+        Species::Classic,
+        None,
+    )
+}
+
+/// `picture` for a species, cut back to `trim` when it has been pruned.
+#[allow(clippy::too_many_arguments)]
+pub fn picture_of(
+    parts: &[Part],
+    growth: f64,
+    season: Season,
+    health: Health,
+    width: usize,
+    mode: ColorMode,
+    species: Species,
+    trim: Option<Trim>,
+) -> Vec<String> {
     let width = width.max(24);
     let dead = health == Health::Dead;
     let shown: Vec<(i32, i32, char, Option<Rgb>)> = parts
         .iter()
-        .filter(|p| p.born <= growth)
+        .filter(|p| p.born <= growth && trim.is_none_or(|t| t.keeps(p)))
         .filter_map(|p| match p.kind {
             Kind::Trunk => Some((p.x, p.y, p.ch, Some(if dead { DEAD_WOOD } else { TRUNK }))),
             Kind::Branch => Some((p.x, p.y, p.ch, Some(if dead { DEAD_WOOD } else { BRANCH }))),
-            Kind::Leaf => leaf(p, season, health).map(|(ch, c)| (p.x, p.y, ch, Some(c))),
+            Kind::Leaf => leaf(p, species, season, health).map(|(ch, c)| (p.x, p.y, ch, Some(c))),
         })
         .collect();
     // A young tree carries a sprout at its top until its own leaves come.
     let mut shown = shown;
-    let has_leaves = shown.iter().any(|&(_, _, ch, _)| ch == '&' || ch == '*');
+    // Classic trees keep their old rule (a sprout whenever no leaf shows);
+    // for the others a bare winter tree is not a young one, so the sprout
+    // shows only until the first leaf has grown.
+    let has_leaves = if species == Species::Classic {
+        shown.iter().any(|&(_, _, ch, _)| ch == '&' || ch == '*')
+    } else {
+        parts
+            .iter()
+            .any(|p| p.kind == Kind::Leaf && p.born <= growth && trim.is_none_or(|t| t.keeps(p)))
+    };
     if !dead && !has_leaves {
         if let Some(&(x, y, _, _)) = shown
             .iter()
@@ -258,6 +332,29 @@ fn days(n: i64, lang: Lang) -> String {
     }
 }
 
+/// A species in words (also the default name of a tree of that species).
+pub fn species_name(sp: Species, lang: Lang) -> &'static str {
+    match (sp, lang) {
+        (Species::Classic, Lang::En) => "Bonsai",
+        (Species::Pine, Lang::En) => "Matsu",
+        (Species::Maple, Lang::En) => "Momiji",
+        (Species::Cherry, Lang::En) => "Sakura",
+        (Species::Classic, Lang::Ja) => "盆栽",
+        (Species::Pine, Lang::Ja) => "松",
+        (Species::Maple, Lang::Ja) => "もみじ",
+        (Species::Cherry, Lang::Ja) => "桜",
+    }
+}
+
+/// "Matsu (pine)", or just the name for a classic tree.
+fn titled(s: &State, lang: Lang) -> String {
+    match (s.species, lang) {
+        (Species::Classic, _) => s.name.clone(),
+        (sp, Lang::En) => format!("{} ({})", s.name, sp.id()),
+        (sp, Lang::Ja) => format!("{}({})", s.name, species_name(sp, lang)),
+    }
+}
+
 /// Health in a few words.
 pub fn health_words(h: Health, lang: Lang) -> &'static str {
     match (h, lang) {
@@ -281,7 +378,7 @@ pub fn status(s: &State, full: f64, lang: Lang) -> String {
     let mut out = match lang {
         Lang::En => format!(
             "{}, planted {} ago, {} grown. Water {}: {}.",
-            s.name,
+            titled(s, lang),
             days(s.age_days(), lang),
             pct(grown),
             pct(s.water),
@@ -289,13 +386,23 @@ pub fn status(s: &State, full: f64, lang: Lang) -> String {
         ),
         Lang::Ja => format!(
             "{}(植えてから{}、成長{})。水{}: {}。",
-            s.name,
+            titled(s, lang),
             days(s.age_days(), lang),
             pct(grown),
             pct(s.water),
             health_words(h, lang)
         ),
     };
+    if s.prunings > 0 {
+        out.push_str(&match lang {
+            Lang::En => format!(
+                " Pruned {} time{}.",
+                s.prunings,
+                if s.prunings == 1 { "" } else { "s" }
+            ),
+            Lang::Ja => format!("剪定{}回。", s.prunings),
+        });
+    }
     if h == Health::Dead {
         out.push_str(match lang {
             Lang::En => " termbonsai plant starts a new one.",

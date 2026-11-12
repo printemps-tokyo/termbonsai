@@ -4,6 +4,8 @@
 
 use std::fmt::Write as _;
 
+use crate::tree::{Kind, Part, Species};
+
 pub const HOUR: i64 = 3_600;
 pub const DAY: i64 = 86_400;
 
@@ -17,6 +19,12 @@ pub const DIE_AFTER_DAYS: f64 = 10.0;
 pub const MOIST_ENOUGH: f64 = 0.9;
 /// Below this the tree asks for water.
 pub const THIRSTY_BELOW: f64 = 0.25;
+/// A pruned tree needs this long before it can be pruned again.
+pub const PRUNE_EVERY_HOURS: i64 = 24;
+/// Pruning never cuts the canopy narrower than this many columns either
+/// side of the trunk, nor lower than this many rows.
+pub const MIN_TRIM_X: i32 = 3;
+pub const MIN_TRIM_Y: i32 = 4;
 
 /// Times are accepted from 1900 to 2400 (Unix seconds), far inside i64, so
 /// no difference of two of them can overflow.
@@ -42,6 +50,37 @@ pub struct State {
     /// When the soil last ran dry, if it is dry.
     pub dry_since: Option<i64>,
     pub waterings: u64,
+    pub species: Species,
+    /// After pruning: nothing grows farther than `x` columns from the trunk
+    /// or higher than `y` rows.
+    pub trim: Option<Trim>,
+    pub pruned_at: Option<i64>,
+    pub prunings: u64,
+}
+
+/// The bounds pruning has cut the canopy back to.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub struct Trim {
+    pub x: i32,
+    pub y: i32,
+}
+
+impl Trim {
+    pub fn keeps(&self, p: &Part) -> bool {
+        p.x.abs() <= self.x && p.y <= self.y
+    }
+}
+
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub enum Pruned {
+    /// Cut this many shoots and leaves.
+    Done(usize),
+    /// Pruned less than `PRUNE_EVERY_HOURS` ago; hours left.
+    TooSoon(i64),
+    /// Only a healthy tree is pruned.
+    NotHealthy(Health),
+    /// Already as small as pruning goes, or nothing grows past the bounds.
+    NothingToCut,
 }
 
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
@@ -74,7 +113,67 @@ impl State {
             growth: 0.0,
             dry_since: None,
             waterings: 0,
+            species: Species::Classic,
+            trim: None,
+            pruned_at: None,
+            prunings: 0,
         }
+    }
+
+    /// The parts that show at the current growth, inside the trim.
+    pub fn visible<'a>(&self, parts: &'a [Part]) -> impl Iterator<Item = &'a Part> + 'a {
+        let (growth, trim) = (self.growth, self.trim);
+        parts
+            .iter()
+            .filter(move |p| p.born <= growth && trim.is_none_or(|t| t.keeps(p)))
+    }
+
+    /// Prune at `now` (the state is first brought up to `now`): pull the
+    /// canopy in by a column on each side and a row on top, no tighter than
+    /// `MIN_TRIM_X` by `MIN_TRIM_Y`. The bounds stay, so the tree keeps
+    /// growing inside them.
+    pub fn prune(&mut self, now: i64, parts: &[Part]) -> Pruned {
+        // A clock behind the last change counts as that moment, so the
+        // pruning time never falls before what the file already records.
+        let now = now.max(self.updated_at);
+        let s = self.at(now);
+        *self = s;
+        let h = self.health();
+        if !matches!(h, Health::Thriving | Health::Thirsty) {
+            return Pruned::NotHealthy(h);
+        }
+        if let Some(t) = self.pruned_at {
+            let ready = t + PRUNE_EVERY_HOURS * HOUR;
+            if now < ready {
+                return Pruned::TooSoon((ready - now + HOUR - 1) / HOUR);
+            }
+        }
+        let shown: Vec<&Part> = self.visible(parts).collect();
+        let reach_x = shown
+            .iter()
+            .filter(|p| p.kind != Kind::Trunk)
+            .map(|p| p.x.abs())
+            .max()
+            .unwrap_or(0);
+        let reach_y = shown.iter().map(|p| p.y).max().unwrap_or(0);
+        let trim = Trim {
+            x: (reach_x - 1).max(MIN_TRIM_X),
+            y: (reach_y - 1).max(MIN_TRIM_Y),
+        };
+        let cut = shown.iter().filter(|p| !trim.keeps(p)).count();
+        if cut == 0 {
+            return Pruned::NothingToCut;
+        }
+        self.trim = Some(match self.trim {
+            Some(old) => Trim {
+                x: trim.x.min(old.x),
+                y: trim.y.min(old.y),
+            },
+            None => trim,
+        });
+        self.pruned_at = Some(now);
+        self.prunings = self.prunings.saturating_add(1);
+        Pruned::Done(cut)
     }
 
     /// When it died, if it has: `DIE_AFTER_DAYS` after the soil ran dry.
@@ -146,6 +245,22 @@ impl State {
             let _ = writeln!(s, "dry_since={d}");
         }
         let _ = writeln!(s, "waterings={}", self.waterings);
+        // Written only when they differ from a classic, unpruned tree, so
+        // such a tree's file reads the same as before they existed. Older
+        // versions ignore keys they do not know.
+        if self.species != Species::Classic {
+            let _ = writeln!(s, "species={}", self.species.id());
+        }
+        if let Some(t) = self.trim {
+            let _ = writeln!(s, "trim_x={}", t.x);
+            let _ = writeln!(s, "trim_y={}", t.y);
+        }
+        if let Some(t) = self.pruned_at {
+            let _ = writeln!(s, "pruned_at={t}");
+        }
+        if self.prunings > 0 {
+            let _ = writeln!(s, "prunings={}", self.prunings);
+        }
         s
     }
 
@@ -187,6 +302,26 @@ impl State {
                 .map(|v| v.parse().map_err(|_| "bad dry_since".to_string()))
                 .transpose()?,
             waterings: num(&get, "waterings")?,
+            species: match get.get("species") {
+                None => Species::Classic,
+                Some(v) => Species::parse(v).ok_or_else(|| format!("unknown species {v:?}"))?,
+            },
+            trim: match (get.get("trim_x"), get.get("trim_y")) {
+                (None, None) => None,
+                (Some(_), Some(_)) => Some(Trim {
+                    x: num(&get, "trim_x")?,
+                    y: num(&get, "trim_y")?,
+                }),
+                _ => return Err("trim_x and trim_y go together".into()),
+            },
+            pruned_at: get
+                .get("pruned_at")
+                .map(|v| v.parse().map_err(|_| "bad pruned_at".to_string()))
+                .transpose()?,
+            prunings: match get.get("prunings") {
+                None => 0,
+                Some(_) => num(&get, "prunings")?,
+            },
         };
         let times_ok = valid_time(s.planted_at)
             && valid_time(s.updated_at)
@@ -201,7 +336,22 @@ impl State {
             let alive_days = (s.updated_at - s.planted_at) as f64 / DAY as f64;
             s.growth <= alive_days + 1e-6
         };
-        if !(0.0..=1.0).contains(&s.water) || !times_ok || !dry_ok || !growth_ok {
+        let trim_ok = s.trim.is_none_or(|t| {
+            (MIN_TRIM_X..=10_000).contains(&t.x) && (MIN_TRIM_Y..=10_000).contains(&t.y)
+        });
+        let pruned_ok = times_ok
+            && s.pruned_at
+                .is_none_or(|t| valid_time(t) && s.planted_at <= t && t <= s.updated_at)
+            // Pruned or not: the bounds, the time and the count go together.
+            && s.trim.is_some() == s.pruned_at.is_some()
+            && s.pruned_at.is_some() == (s.prunings > 0);
+        if !(0.0..=1.0).contains(&s.water)
+            || !times_ok
+            || !dry_ok
+            || !growth_ok
+            || !trim_ok
+            || !pruned_ok
+        {
             return Err("the values in the state file do not fit together".into());
         }
         Ok(s)

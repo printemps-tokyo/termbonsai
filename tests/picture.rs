@@ -141,3 +141,55 @@ fn words() {
     );
     assert_eq!(line(&dead, Lang::Ja, false), "M 20日 水0% 枯死");
 }
+
+#[test]
+fn species_look_like_themselves() {
+    use termbonsai::draw::picture_of;
+    use termbonsai::tree::{grow_species, Species};
+    let draw = |sp: Species, season: Season| {
+        let parts = grow_species(5, sp);
+        picture_of(
+            &parts,
+            full_grown(&parts),
+            season,
+            Health::Thriving,
+            80,
+            ColorMode::None,
+            sp,
+            None,
+        )
+    };
+    let pine_winter = draw(Species::Pine, Season::Winter);
+    assert!(count(&pine_winter, '^') > 40, "{pine_winter:#?}");
+    assert_eq!(count(&pine_winter, '&'), 0);
+    let maple_winter = draw(Species::Maple, Season::Winter);
+    let maple_summer = draw(Species::Maple, Season::Summer);
+    assert!(count(&maple_winter, '&') * 5 < count(&maple_summer, '&'));
+    // A bare grown tree gets no sprout (drawn in its own green, 7c c8 4a).
+    let parts = grow_species(5, Species::Maple);
+    let colored = picture_of(
+        &parts,
+        full_grown(&parts),
+        Season::Winter,
+        Health::Thriving,
+        80,
+        ColorMode::TrueColor,
+        Species::Maple,
+        None,
+    );
+    assert!(!colored.concat().contains("38;2;124;200;74"));
+    let young = picture_of(
+        &parts,
+        0.0,
+        Season::Winter,
+        Health::Thriving,
+        80,
+        ColorMode::TrueColor,
+        Species::Maple,
+        None,
+    );
+    assert!(young.concat().contains("38;2;124;200;74"));
+    let cherry_spring = draw(Species::Cherry, Season::Spring);
+    assert!(count(&cherry_spring, '*') > 3 * count(&cherry_spring, '&'));
+    assert_eq!(count(&draw(Species::Cherry, Season::Winter), '&'), 0);
+}

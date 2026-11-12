@@ -177,3 +177,92 @@ fn a_tree_takes_about_a_month_to_fill_out() {
     let days: Vec<f64> = (0..300).map(|seed| full_grown(&grow(seed))).collect();
     assert!(days.iter().all(|d| (25.0..50.0).contains(d)), "{days:?}");
 }
+
+#[test]
+fn species_and_pruning_survive_a_save() {
+    use termbonsai::state::{Pruned, Trim};
+    use termbonsai::tree::{grow_species, Species};
+    let mut s = State::plant(9, "Matsu", T0);
+    s.species = Species::Pine;
+    let parts = grow_species(9, Species::Pine);
+    // Too young: nothing past the minimum bounds yet.
+    assert_eq!(s.prune(T0 + 3_600, &parts), Pruned::NothingToCut);
+    for d in (2..=60).step_by(2) {
+        s.water(T0 + d * DAY);
+    }
+    let now = T0 + 60 * DAY;
+    let before = s.at(now).visible(&parts).count();
+    match s.prune(now, &parts) {
+        Pruned::Done(n) => assert!(n > 0),
+        other => panic!("{other:?}"),
+    }
+    let after = s.visible(&parts).count();
+    assert!(after < before);
+    let t = s.trim.unwrap();
+    assert!(s.visible(&parts).all(|p| p.x.abs() <= t.x && p.y <= t.y));
+    assert_eq!(s.prune(now + 3_600, &parts), Pruned::TooSoon(23));
+    let back = State::from_text(&s.to_text()).unwrap();
+    assert_eq!(back, s);
+    // A classic, unpruned tree writes no new keys.
+    let plain = State::plant(9, "x", T0).to_text();
+    assert!(!plain.contains("species") && !plain.contains("trim"));
+    // Bad values are refused.
+    let bad = s.to_text().replace(&format!("trim_x={}", t.x), "trim_x=1");
+    assert!(State::from_text(&bad).is_err());
+    let bad = s.to_text().replace("species=pine", "species=oak");
+    assert!(State::from_text(&bad).is_err());
+    let lone = s.to_text().replace(&format!("trim_y={}\n", t.y), "");
+    assert!(State::from_text(&lone).is_err());
+    assert!(Trim { x: 3, y: 4 }.keeps(&parts[0]));
+}
+
+fn fnv(s: &str) -> u64 {
+    let mut h: u64 = 0xcbf2_9ce4_8422_2325;
+    for b in s.bytes() {
+        h ^= u64::from(b);
+        h = h.wrapping_mul(0x0100_0000_01b3);
+    }
+    h
+}
+
+#[test]
+fn classic_is_the_old_tree() {
+    use termbonsai::tree::{grow_species, Species};
+    // FNV-1a of the Debug form of every part (position, glyph, kind, birth
+    // day, tag), computed with termbonsai 0.1.0 (commit c01b5ac) before
+    // species existed: any change to the classic tree changes these.
+    for (seed, digest) in [
+        (1u64, 0x8917_3a30_6068_9c1d_u64),
+        (7, 0x424c_d5ed_bd48_917c),
+        (42, 0x72e6_6cd0_2a87_e902),
+        (1234, 0x6fb6_4a53_8fe0_f705),
+        (u64::MAX, 0x0c36_6e70_15fc_8355),
+    ] {
+        assert_eq!(fnv(&format!("{:?}", grow(seed))), digest, "seed {seed}");
+        assert_eq!(grow(seed), grow_species(seed, Species::Classic));
+        assert_ne!(grow(seed), grow_species(seed, Species::Pine));
+    }
+}
+
+#[test]
+fn pruning_with_a_clock_behind_keeps_a_readable_file() {
+    use termbonsai::state::Pruned;
+    use termbonsai::tree::{grow_species, Species};
+    let parts = grow_species(9, Species::Classic);
+    let mut s = State::plant(9, "x", T0);
+    for d in (2..=40).step_by(2) {
+        s.water(T0 + d * DAY);
+    }
+    // The clock now reads earlier than planting.
+    assert!(matches!(s.prune(T0 - 1, &parts), Pruned::Done(_)));
+    assert_eq!(s.pruned_at, Some(s.updated_at));
+    assert!(State::from_text(&s.to_text()).is_ok());
+    // The pruning keys go together.
+    let without_time = s
+        .to_text()
+        .lines()
+        .filter(|l| !l.starts_with("pruned_at="))
+        .collect::<Vec<_>>()
+        .join("\n");
+    assert!(State::from_text(&without_time).is_err());
+}

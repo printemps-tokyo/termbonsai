@@ -5,6 +5,102 @@
 
 use crate::rng::Rng;
 
+/// The kind of tree. `Classic` is the tree termbonsai has always grown; the
+/// others change its proportions here and its leaves in `draw`.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub enum Species {
+    Classic,
+    /// Black pine: a taller, bent trunk, long flat branches, evergreen pads.
+    Pine,
+    /// Japanese maple: red in autumn, bare in winter.
+    Maple,
+    /// Cherry: wide, rising branches, covered in blossom in spring.
+    Cherry,
+}
+
+impl Species {
+    pub const ALL: [Species; 4] = [
+        Species::Classic,
+        Species::Pine,
+        Species::Maple,
+        Species::Cherry,
+    ];
+
+    pub fn id(self) -> &'static str {
+        match self {
+            Species::Classic => "classic",
+            Species::Pine => "pine",
+            Species::Maple => "maple",
+            Species::Cherry => "cherry",
+        }
+    }
+
+    pub fn parse(s: &str) -> Option<Species> {
+        Species::ALL.into_iter().find(|sp| sp.id() == s)
+    }
+
+    /// The proportions this species grows with.
+    fn shape(self) -> Shape {
+        match self {
+            Species::Classic => Shape::CLASSIC,
+            Species::Pine => Shape {
+                min_height: 6,
+                rise: 0.12,
+                lean: 0.5,
+                branch_extra: 2,
+                flat_pads: true,
+                ..Shape::CLASSIC
+            },
+            Species::Maple => Shape {
+                rise: 0.35,
+                fill: 0.95,
+                ..Shape::CLASSIC
+            },
+            Species::Cherry => Shape {
+                height_spread: 3,
+                rise: 0.45,
+                branch_extra: 1,
+                crown: 3,
+                ..Shape::CLASSIC
+            },
+        }
+    }
+}
+
+/// Numbers that set a tree's proportions. `CLASSIC` holds the values the
+/// classic tree has always used, so it grows exactly as before.
+#[derive(Clone, Copy)]
+struct Shape {
+    /// Trunk height: `min_height` + a draw below `height_spread`.
+    min_height: i32,
+    height_spread: u64,
+    /// Chance that a branch step also rises a row.
+    rise: f64,
+    /// Chance that a straight trunk starts to lean.
+    lean: f64,
+    /// Extra steps on every branch.
+    branch_extra: i32,
+    /// Chance that a cell inside a leaf pad has a leaf.
+    fill: f64,
+    /// Pads one row deep, as pine foliage grows.
+    flat_pads: bool,
+    /// Size of the pad on top of the trunk.
+    crown: i32,
+}
+
+impl Shape {
+    const CLASSIC: Shape = Shape {
+        min_height: 5,
+        height_spread: 4,
+        rise: 0.3,
+        lean: 0.35,
+        branch_extra: 0,
+        fill: 0.9,
+        flat_pads: false,
+        crown: 2,
+    };
+}
+
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub enum Kind {
     Trunk,
@@ -47,6 +143,7 @@ fn stroke(dx: i32, dy: i32) -> char {
 struct Grower {
     rng: Rng,
     parts: Vec<Part>,
+    shape: Shape,
 }
 
 impl Grower {
@@ -65,12 +162,15 @@ impl Grower {
     /// A flat cloud of leaves over a tip, the way bonsai foliage grows in
     /// pads, filling in over the days after `born`.
     fn leaves(&mut self, x: i32, y: i32, born: f64, size: i32) {
-        let (rx, ry) = (2 * size + 1, size.max(1));
+        let (rx, ry) = (
+            2 * size + 1,
+            if self.shape.flat_pads { 1 } else { size.max(1) },
+        );
         for dy in 0..=ry {
             for dx in -rx..=rx {
                 // Flatter on top: an ellipse cut at the tip's row.
                 let d = (dx as f64 / rx as f64).powi(2) + (dy as f64 / (ry as f64 + 0.5)).powi(2);
-                if d <= 1.0 && self.rng.f64() < 0.9 {
+                if d <= 1.0 && self.rng.f64() < self.shape.fill {
                     let b = born + 0.8 + d * 2.5 + self.rng.f64();
                     self.push(x + dx, y + dy, '&', Kind::Leaf, b);
                 }
@@ -80,11 +180,15 @@ impl Grower {
 
     /// A branch from (x, y) going `side` (-1 or 1), and maybe its own branches.
     fn branch(&mut self, mut x: i32, mut y: i32, side: i32, born: f64, depth: u32) {
-        let len = 3 + self.rng.below(3) as i32 + 6 / (depth as i32 + 2);
+        let len = 3 + self.rng.below(3) as i32 + 6 / (depth as i32 + 2) + self.shape.branch_extra;
         let mut b = born;
         for step in 0..len {
             // Mostly outward, rising now and then: bonsai branches spread.
-            let dy = if self.rng.f64() < 0.3 { 1 } else { 0 };
+            let dy = if self.rng.f64() < self.shape.rise {
+                1
+            } else {
+                0
+            };
             x += side;
             y += dy;
             b += BRANCH_STEP;
@@ -98,17 +202,24 @@ impl Grower {
     }
 }
 
-/// The whole tree for a seed.
+/// The whole classic tree for a seed.
 pub fn grow(seed: u64) -> Vec<Part> {
+    grow_species(seed, Species::Classic)
+}
+
+/// The whole tree of a species for a seed.
+pub fn grow_species(seed: u64, species: Species) -> Vec<Part> {
+    let shape = species.shape();
     let mut g = Grower {
         rng: Rng::new(seed),
         parts: Vec::new(),
+        shape,
     };
     // The flare at the base.
     g.push(-1, 0, '/', Kind::Trunk, 0.0);
     g.push(1, 0, '\\', Kind::Trunk, 0.0);
     g.push(0, 0, '|', Kind::Trunk, 0.0);
-    let height = 5 + g.rng.below(4) as i32;
+    let height = shape.min_height + g.rng.below(shape.height_spread) as i32;
     let (mut x, mut lean) = (0i32, 0i32);
     let mut side = if g.rng.f64() < 0.5 { 1 } else { -1 };
     let mut branches = 0;
@@ -116,7 +227,7 @@ pub fn grow(seed: u64) -> Vec<Part> {
         // The trunk bends now and then, and straightens again.
         lean = if lean != 0 && g.rng.f64() < 0.6 {
             0
-        } else if g.rng.f64() < 0.35 {
+        } else if g.rng.f64() < shape.lean {
             if g.rng.f64() < 0.5 {
                 1
             } else {
@@ -139,7 +250,7 @@ pub fn grow(seed: u64) -> Vec<Part> {
         }
     }
     let top = height as f64 * TRUNK_STEP;
-    g.leaves(x, height + 1, top + 2.0, 2);
+    g.leaves(x, height + 1, top + 2.0, shape.crown);
     g.parts
 }
 

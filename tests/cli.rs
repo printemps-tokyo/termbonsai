@@ -281,3 +281,172 @@ fn force_replaces_a_file_that_cannot_be_read() {
     assert_eq!(g.run(T0, &["plant", "--force", "--seed", "3"]).0, 0);
     assert!(std::fs::read_to_string(&path).unwrap().contains("seed=3"));
 }
+
+const DAY: i64 = 86_400;
+
+#[test]
+fn pots_species_and_watering_them_all() {
+    let g = Garden::new("pots");
+    let (c, out, err) = g.run(T0, &["plant", "--seed", "7"]);
+    assert_eq!(c, 0, "{err}");
+    assert!(out.contains("Keyaki is planted"), "{out}");
+    let (c, out, _) = g.run(
+        T0,
+        &["plant", "--pot", "pine", "--species", "pine", "--seed", "3"],
+    );
+    assert_eq!(c, 0);
+    assert!(out.contains("Matsu is planted"), "{out}");
+    let (c, _, _) = g.run(T0, &["plant", "--pot", "cherry", "--species", "cherry"]);
+    assert_eq!(c, 0);
+    assert!(g.dir.join("bonsai@pine").exists());
+    let (c, out, _) = g.run(T0 + DAY, &["pots"]);
+    assert_eq!(c, 0);
+    let lines: Vec<&str> = out.lines().collect();
+    assert_eq!(lines.len(), 3, "{out}");
+    assert!(
+        lines[0].starts_with("(first)") && lines[0].contains("Keyaki"),
+        "{out}"
+    );
+    assert!(
+        lines[1].starts_with("cherry") && lines[2].starts_with("pine"),
+        "{out}"
+    );
+
+    let (c, out, _) = g.run(T0 + 2 * DAY, &["water", "--all"]);
+    assert_eq!(c, 0);
+    assert_eq!(out.lines().count(), 3, "{out}");
+    assert!(out.contains("[pine] You water Matsu"), "{out}");
+    let (_, status, _) = g.run(T0 + 2 * DAY, &["status", "--pot", "pine"]);
+    assert!(status.contains("\"species\":\"pine\""), "{status}");
+    assert!(status.contains("\"waterings\":1"), "{status}");
+    let (_, show, _) = g.run(
+        T0 + 2 * DAY,
+        &[
+            "--pot",
+            "pine",
+            "--at",
+            "+60d",
+            "--watered",
+            "--color",
+            "never",
+        ],
+    );
+    assert!(
+        show.contains('^') && show.contains("Matsu (pine)"),
+        "{show}"
+    );
+}
+
+#[test]
+fn pruning_a_grown_tree() {
+    let g = Garden::new("prune");
+    g.run(T0, &["plant", "--seed", "11"]);
+    // Water it every other day for 40 days.
+    for d in (2..=40).step_by(2) {
+        g.run(T0 + d * DAY, &["water"]);
+    }
+    let at = T0 + 40 * DAY;
+    let width = |s: &str| {
+        s.lines()
+            .take_while(|l| !l.contains(":==="))
+            .map(|l| {
+                let t = l.trim_end();
+                (t.len() - t.trim_start().len(), t.len())
+            })
+            .fold((usize::MAX, 0), |(lo, hi), (a, b)| (lo.min(a), hi.max(b)))
+    };
+    let (_, before, _) = g.run(at, &["--color", "never", "--season", "summer"]);
+    let (c, out, _) = g.run(at, &["prune"]);
+    assert_eq!(c, 0, "{out}");
+    assert!(out.contains("You prune"), "{out}");
+    let (_, after, _) = g.run(at, &["--color", "never", "--season", "summer"]);
+    let (b, a) = (width(&before), width(&after));
+    assert!(
+        a.1 - a.0 < b.1 - b.0,
+        "narrower after pruning: {before}\n---\n{after}"
+    );
+    assert!(after.contains("Pruned 1 time."), "{after}");
+
+    // Once a day.
+    let (c, out, _) = g.run(at + 3_600, &["prune"]);
+    assert_eq!(c, 1);
+    assert!(out.contains("23 hours"), "{out}");
+    // Not a dry tree.
+    let (c, out, _) = g.run(at + 6 * DAY, &["prune"]);
+    assert_eq!(c, 1);
+    assert!(out.contains("too dry"), "{out}");
+    let text = std::fs::read_to_string(g.dir.join("bonsai")).unwrap();
+    assert!(
+        text.contains("trim_x=") && text.contains("prunings=1"),
+        "{text}"
+    );
+}
+
+#[test]
+fn pot_and_species_usage_errors() {
+    let g = Garden::new("potusage");
+    for args in [
+        &["--pot", "../x"][..],
+        &["--pot", ""][..],
+        &["plant", "--species", "oak"][..],
+        &["water", "--species", "pine"][..],
+        &["show", "--all"][..],
+        &["water", "--all", "--pot", "a"][..],
+        &["pots", "--pot", "a"][..],
+        &["prune", "--at", "+1d"][..],
+    ] {
+        let (c, _, err) = g.run(T0, args);
+        assert_eq!(c, 2, "{args:?}: {err}");
+    }
+    let (c, out, _) = g.run(T0, &["pots"]);
+    assert_eq!(c, 0);
+    assert!(out.contains("No pots yet"), "{out}");
+}
+
+#[test]
+fn random_species_vary_and_pots_skip_links() {
+    let g = Garden::new("random");
+    let mut seen = std::collections::BTreeSet::new();
+    for seed in 0..40u64 {
+        g.run(
+            T0,
+            &[
+                "plant",
+                "--force",
+                "--species",
+                "random",
+                "--seed",
+                &seed.to_string(),
+            ],
+        );
+        let (_, status, _) = g.run(T0, &["status"]);
+        let sp = status
+            .split("\"species\":\"")
+            .nth(1)
+            .unwrap()
+            .split('"')
+            .next()
+            .unwrap()
+            .to_string();
+        seen.insert(sp);
+    }
+    assert_eq!(seen.len(), 4, "{seen:?}");
+
+    #[cfg(unix)]
+    {
+        std::os::unix::fs::symlink(g.dir.join("bonsai"), g.dir.join("bonsai@alias")).unwrap();
+        std::fs::create_dir(g.dir.join("bonsai@dir")).unwrap();
+        let (c, out, _) = g.run(T0 + 2 * DAY, &["pots"]);
+        assert_eq!(c, 0);
+        assert_eq!(out.lines().count(), 1, "{out}");
+        let (c, out, _) = g.run(T0 + 2 * DAY, &["water", "--all"]);
+        assert_eq!(c, 0);
+        assert_eq!(out.lines().count(), 1, "{out}");
+    }
+    // A pot that cannot be read fails the run after the others are watered.
+    std::fs::write(g.dir.join("bonsai@broken"), "nonsense").unwrap();
+    let (c, out, err) = g.run(T0 + 3 * DAY, &["water", "--all"]);
+    assert_eq!(c, 2, "{out}{err}");
+    assert!(err.contains("[broken]"), "{err}");
+    assert_eq!(out.lines().count(), 1, "{out}");
+}

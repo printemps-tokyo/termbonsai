@@ -55,13 +55,19 @@ termbonsai line            # one line for a status bar
 termbonsai status          # its state as JSON
 termbonsai plant --force   # start over with a new tree
 termbonsai --at +30d --watered   # how it will look in 30 days, if you keep watering
+termbonsai prune           # cut it back to a tidier shape (once a day)
+termbonsai plant --pot pine --species pine   # a second pot, a black pine
+termbonsai pots            # every pot at a glance
+termbonsai water --all     # water them all
 ```
 
 | Command | What it does |
 | --- | --- |
 | `show` (default) | Draw the tree and how it is doing. The first run plants one. |
-| `water` | Water it. Watering soil that is still moist (90% or more) does nothing. |
-| `plant` | Plant a new tree; `--seed N` for a given shape, `--name NAME`; `--force` replaces a living tree. |
+| `water` | Water it. Watering soil that is still moist (90% or more) does nothing. `--all` waters every pot. |
+| `plant` | Plant a new tree; `--seed N` for a given shape, `--name NAME`, `--species S`; `--force` replaces a living tree. |
+| `prune` | Cut the canopy back by a column on each side and a row on top (see Pruning). |
+| `pots` | One line for every pot: its name, the tree, its age, water and health. |
 | `grow` | Replay its growth from a sprout to today (an animation on a terminal; it clears the screen). |
 | `line` | One line, like `Momiji 12d water 64% ok`; `--tmux` adds tmux colors. |
 | `status` | Its state as JSON. |
@@ -75,6 +81,9 @@ termbonsai --at +30d --watered   # how it will look in 30 days, if you keep wate
 | `--width N` | Picture width, 24 to 200 | `60` |
 | `--color C` | `auto`, `always` or `never`; `auto` honors [`NO_COLOR`](https://no-color.org/) and is off when not a terminal | `auto` |
 | `--lang L` | `auto`, `ja` or `en`; `auto` reads `LC_ALL`, `LC_MESSAGES`, `LANG` | `auto` |
+| `--species S` | With `plant`: `classic`, `pine`, `maple`, `cherry` or `random` (by the seed) | `classic` |
+| `--pot NAME` | Another pot, kept beside the first (1 to 32 letters, digits, `-`, `_`) | the first pot |
+| `--all` | With `water`: every pot | |
 | `--state PATH` | The state file | see below |
 
 ## How it lives
@@ -92,6 +101,44 @@ termbonsai --at +30d --watered   # how it will look in 30 days, if you keep wate
 - Nothing runs in the background. The state is a small text file with the time
   it was last watered; every look works out the present from it, so the tree
   keeps living while the terminal is closed.
+
+## Species
+
+| Species | Shape | Through the year |
+| --- | --- | --- |
+| `classic` | The tree termbonsai has always grown | Blossoms in spring, green in summer, red, orange and gold in autumn, sparse in winter |
+| `pine` | A taller, bending trunk, long flat branches, thin pads of needles (`^`) | Evergreen: new light candles in spring, a touch of bronze in autumn, dark green all winter |
+| `maple` | Classic proportions, fuller pads | Red new leaves in spring, deep reds in autumn, bare in winter |
+| `cherry` | Wide branches that rise, a bigger crown | Covered in blossom (`*`) in spring, orange and red in autumn, bare in winter |
+
+A classic tree grows exactly as before species existed, and its state file has
+no species line. The species is fixed at planting.
+
+## Pruning
+
+`termbonsai prune` cuts the canopy back to one column narrower on each side
+and one row lower than its widest branch and its top, never tighter than 3
+columns either side of the trunk by 4 rows. The bounds stay: the tree keeps
+growing inside them, and the next pruning tightens them further. Only a
+healthy tree is pruned (not a dry, wilting or dead one), at most once in 24
+hours; a young tree with nothing past the bounds has nothing to cut. `prune`
+exits 1 when it cut nothing.
+
+## Pots
+
+`--pot NAME` gives any command another tree, kept in its own state file next
+to the first one (`bonsai@NAME` beside `bonsai`), with its own lock. Every
+command works on one pot; `termbonsai pots` lists them all, and
+`termbonsai water --all` waters each one in turn (a pot that cannot be read is
+reported, the others are still watered, and the run exits 2). Only plain files
+count as pots; links and directories named like one are skipped:
+
+```console
+$ termbonsai pots
+(first)      Keyaki 40d water 64% ok
+cherry       Sakura 12d water 20% thirsty
+pine         Matsu 25d water 67% ok
+```
 
 ## In a tmux status bar
 
@@ -113,7 +160,9 @@ operating-system lock on a file next to it (`bonsai.lock`) keeps two termbonsai
 from changing the tree at once; the lock ends with the process, even a crashed
 one. A file that
 cannot be read is reported; `termbonsai plant --force` starts over. To keep a
-tree on another machine, copy the file.
+tree on another machine, copy the file. Other pots are the same kind of file
+with `@NAME` added to the name. Version 0.1 reads a 0.2 file as a classic,
+unpruned tree (it ignores the keys it does not know).
 
 ## Credits
 

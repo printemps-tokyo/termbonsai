@@ -4,8 +4,8 @@ use std::process::ExitCode;
 use std::time::{Duration, SystemTime, UNIX_EPOCH};
 
 use termbonsai::draw::{self, ColorMode, Lang, Season};
-use termbonsai::state::{self, Health, State, Watered, DAY, HOUR};
-use termbonsai::tree;
+use termbonsai::state::{self, Health, Pruned, State, Watered, DAY, HOUR};
+use termbonsai::tree::{self, Species};
 
 const HELP: &str = "\
 termbonsai: a bonsai that lives in your terminal.
@@ -13,18 +13,24 @@ termbonsai: a bonsai that lives in your terminal.
 Usage: termbonsai [show]        Show your bonsai (plants one the first time)
        termbonsai water         Water it (the soil dries out in 3 days)
        termbonsai plant         Plant a new one (--force to replace a living tree)
+       termbonsai prune         Cut the canopy back by a step (once a day, healthy trees)
        termbonsai grow          Watch it grow from a sprout to today (clears the screen)
        termbonsai line          One line for a status bar (--tmux for tmux colors)
        termbonsai status        Its state as JSON
+       termbonsai pots          List every pot and how its tree is doing
 
 It grows only while its soil is wet. Dry for 4 days it starts to drop its
-leaves; dry for 10 days it dies.
+leaves; dry for 10 days it dies. Pruning keeps it compact: growth goes on
+inside the bounds it sets.
 
 Options:
   --at OFFSET    Show it at a later time: +30d, +12h (nothing is saved)
   --watered      With --at: as if watered all along
   --seed N       With plant: the tree's shape (random when omitted)
   --name NAME    With plant: its name
+  --species S    With plant: classic, pine, maple, cherry or random (classic)
+  --pot NAME     Another pot, kept beside the first: letters, digits, - and _
+  --all          With water: water every pot
   --force        With plant: replace a living tree, or a state file that
                  cannot be read
   --tmux         With line: tmux color codes
@@ -67,6 +73,18 @@ struct Args {
     color: String,
     lang: Option<Lang>,
     state: Option<PathBuf>,
+    /// None: classic; Some(None): random by seed.
+    species: Option<Option<Species>>,
+    pot: Option<String>,
+    all: bool,
+}
+
+/// Pot names are used in file names, so they are kept plain.
+fn valid_pot(name: &str) -> bool {
+    (1..=32).contains(&name.len())
+        && name
+            .chars()
+            .all(|c| c.is_ascii_alphanumeric() || c == '-' || c == '_')
 }
 
 /// "+30d", "12h" in seconds. Only the future: the tree keeps no history of
@@ -109,6 +127,9 @@ fn parse(argv: Vec<String>) -> Result<Option<Args>, String> {
         color: "auto".into(),
         lang: None,
         state: None,
+        species: None,
+        pot: None,
+        all: false,
     };
     let mut command_given = false;
     let mut it = argv.into_iter();
@@ -120,7 +141,7 @@ fn parse(argv: Vec<String>) -> Result<Option<Args>, String> {
         if inline.is_some()
             && matches!(
                 flag.as_str(),
-                "--watered" | "--force" | "--tmux" | "--south" | "--help" | "--version"
+                "--watered" | "--force" | "--tmux" | "--south" | "--all" | "--help" | "--version"
             )
         {
             return Err(format!("{flag} takes no value"));
@@ -188,9 +209,33 @@ fn parse(argv: Vec<String>) -> Result<Option<Args>, String> {
                 }
             }
             "--state" => a.state = Some(PathBuf::from(val("a file name")?)),
+            "--species" => {
+                let v = val("a species")?;
+                a.species = Some(match v.as_str() {
+                    "random" => None,
+                    s => Some(
+                        Species::parse(s)
+                            .ok_or("--species must be classic, pine, maple, cherry or random")?,
+                    ),
+                });
+            }
+            "--pot" => {
+                let v = val("a pot name")?;
+                if !valid_pot(&v) {
+                    return Err(
+                        "--pot: 1 to 32 letters, digits, - or _ (it becomes part of a file name)"
+                            .into(),
+                    );
+                }
+                a.pot = Some(v);
+            }
+            "--all" => a.all = true,
             f if f.starts_with('-') => return Err(format!("unknown option {:?}; see --help", f)),
             c if !command_given
-                && matches!(c, "show" | "water" | "plant" | "grow" | "line" | "status") =>
+                && matches!(
+                    c,
+                    "show" | "water" | "plant" | "grow" | "line" | "status" | "prune" | "pots"
+                ) =>
             {
                 a.command = c.to_string();
                 command_given = true;
@@ -204,10 +249,23 @@ fn parse(argv: Vec<String>) -> Result<Option<Args>, String> {
         "--seed, --name and --force go with plant",
     )?;
     only(a.command != "line" && a.tmux, "--tmux goes with line")?;
+    only(
+        a.command != "plant" && a.species.is_some(),
+        "--species goes with plant",
+    )?;
+    only(a.command != "water" && a.all, "--all goes with water")?;
+    only(
+        a.all && a.pot.is_some(),
+        "--all waters every pot; leave out --pot",
+    )?;
+    only(
+        a.command == "pots" && (a.pot.is_some() || a.at.is_some()),
+        "pots lists every pot as it is now; leave out --pot and --at",
+    )?;
     only(a.watered && a.at.is_none(), "--watered goes with --at")?;
     only(
-        a.at.is_some() && matches!(a.command.as_str(), "water" | "plant"),
-        "--at only previews; it cannot water or plant",
+        a.at.is_some() && matches!(a.command.as_str(), "water" | "plant" | "prune"),
+        "--at only previews; it cannot water, plant or prune",
     )?;
     Ok(Some(a))
 }
@@ -232,7 +290,64 @@ fn now() -> Result<i64, String> {
     Ok(t)
 }
 
+/// The state file of a pot: the main file for the first pot, and next to it
+/// `<name>@<pot>` for the others.
 fn state_path(a: &Args) -> Result<PathBuf, String> {
+    let base = base_path(a)?;
+    Ok(match &a.pot {
+        Some(pot) => pot_path(&base, pot),
+        None => base,
+    })
+}
+
+fn pot_path(base: &Path, pot: &str) -> PathBuf {
+    let mut name = base
+        .file_name()
+        .map_or_else(|| "bonsai".into(), |n| n.to_os_string());
+    name.push(format!("@{pot}"));
+    base.with_file_name(name)
+}
+
+/// Every pot that has a state file: (pot name or None for the first, path).
+fn pots(base: &Path) -> Result<Vec<(Option<String>, PathBuf)>, String> {
+    let mut out = Vec::new();
+    if base.exists() {
+        out.push((None, base.to_path_buf()));
+    }
+    let prefix = format!(
+        "{}@",
+        base.file_name()
+            .map_or("bonsai".into(), |n| n.to_string_lossy().into_owned())
+    );
+    let dir = base
+        .parent()
+        .filter(|d| !d.as_os_str().is_empty())
+        .unwrap_or(Path::new("."));
+    let entries = match std::fs::read_dir(dir) {
+        Ok(e) => e,
+        Err(e) if e.kind() == std::io::ErrorKind::NotFound => return Ok(out),
+        Err(e) => return Err(format!("cannot list {}: {e}", shown(dir))),
+    };
+    let mut named = Vec::new();
+    for entry in entries.flatten() {
+        // Plain files only: a symbolic link to another pot would be watered
+        // twice under a different lock, and a directory is no tree.
+        if !entry.file_type().is_ok_and(|t| t.is_file()) {
+            continue;
+        }
+        let name = entry.file_name().to_string_lossy().into_owned();
+        if let Some(pot) = name.strip_prefix(&prefix) {
+            if valid_pot(pot) {
+                named.push((Some(pot.to_string()), entry.path()));
+            }
+        }
+    }
+    named.sort();
+    out.extend(named);
+    Ok(out)
+}
+
+fn base_path(a: &Args) -> Result<PathBuf, String> {
     if let Some(p) = &a.state {
         return Ok(p.clone());
     }
@@ -376,13 +491,30 @@ fn new_tree(a: &Args, now: i64, lang: Lang) -> State {
             .map_or(0, |d| d.as_nanos() as u64);
         t ^ (std::process::id() as u64).rotate_left(32)
     });
-    let pick = (seed % NAMES_EN.len() as u64) as usize;
-    let name = match (&a.name, lang) {
-        (Some(n), _) => state::clean_name(n),
-        (None, Lang::En) => NAMES_EN[pick].to_string(),
-        (None, Lang::Ja) => NAMES_JA[pick].to_string(),
+    let species = match a.species {
+        None => Species::Classic,
+        Some(Some(s)) => s,
+        // The whole seed, mixed (splitmix64's finalizer), so the species
+        // neither follows the name nor depends on a few bits that a
+        // clock-based seed leaves at 0.
+        Some(None) => {
+            let mut z = seed ^ 0x5bd1_e995_9e37_79b9;
+            z = (z ^ (z >> 30)).wrapping_mul(0xbf58_476d_1ce4_e5b9);
+            z = (z ^ (z >> 27)).wrapping_mul(0x94d0_49bb_1331_11eb);
+            z ^= z >> 31;
+            Species::ALL[(z % Species::ALL.len() as u64) as usize]
+        }
     };
-    State::plant(seed, &name, now)
+    let pick = (seed % NAMES_EN.len() as u64) as usize;
+    let name = match (&a.name, lang, species) {
+        (Some(n), _, _) => state::clean_name(n),
+        (None, _, Species::Classic) if lang == Lang::En => NAMES_EN[pick].to_string(),
+        (None, _, Species::Classic) => NAMES_JA[pick].to_string(),
+        (None, l, sp) => draw::species_name(sp, l).to_string(),
+    };
+    let mut s = State::plant(seed, &name, now);
+    s.species = species;
+    s
 }
 
 fn json_str(s: &str) -> String {
@@ -422,7 +554,8 @@ fn status_json(s: &State, full: f64, season: Season) -> String {
     };
     format!(
         "{{\"name\":{},\"seed\":{},\"plantedAt\":{},\"at\":{},\"ageDays\":{},\"growthDays\":{},\"fullGrownDays\":{},\
-         \"water\":{},\"health\":\"{health}\",\"drySince\":{},\"diedAt\":{},\"waterings\":{},\"season\":\"{season}\"}}",
+         \"water\":{},\"health\":\"{health}\",\"drySince\":{},\"diedAt\":{},\"waterings\":{},\"season\":\"{season}\",\
+         \"species\":\"{}\",\"trim\":{},\"prunedAt\":{},\"prunings\":{}}}",
         json_str(&s.name),
         s.seed,
         s.planted_at,
@@ -433,7 +566,14 @@ fn status_json(s: &State, full: f64, season: Season) -> String {
         s.water,
         s.dry_since.map_or("null".to_string(), |d| d.to_string()),
         died.map_or("null".to_string(), |d| d.to_string()),
-        s.waterings
+        s.waterings,
+        s.species.id(),
+        s.trim.map_or("null".to_string(), |t| format!(
+            "{{\"x\":{},\"y\":{}}}",
+            t.x, t.y
+        )),
+        s.pruned_at.map_or("null".to_string(), |t| t.to_string()),
+        s.prunings
     )
 }
 
@@ -441,6 +581,21 @@ fn planted_message(s: &State, lang: Lang) -> String {
     match lang {
         Lang::En => format!("{} is planted. Water it every couple of days.", s.name),
         Lang::Ja => format!("{}を植えました。2日に1回くらい水をやってください。", s.name),
+    }
+}
+
+fn watered_message(result: Watered, name: &str, lang: Lang) -> String {
+    match (result, lang) {
+        (Watered::Done, Lang::En) => format!("You water {name}. The soil is wet again."),
+        (Watered::Done, Lang::Ja) => format!("{name}に水をやりました。土が湿りました。"),
+        (Watered::AlreadyMoist, Lang::En) => format!("{name}'s soil is still moist; no need yet."),
+        (Watered::AlreadyMoist, Lang::Ja) => {
+            format!("{name}の土はまだ湿っています。今はまだ不要です。")
+        }
+        (Watered::Dead, Lang::En) => format!("{name} has died. termbonsai plant starts a new one."),
+        (Watered::Dead, Lang::Ja) => {
+            format!("{name}は枯れてしまいました。termbonsai plantで植え直せます。")
+        }
     }
 }
 
@@ -478,6 +633,136 @@ fn run(a: Args) -> Result<ExitCode, String> {
         return Ok(ExitCode::SUCCESS);
     }
 
+    if a.command == "pots" {
+        let list = pots(&base_path(&a)?)?;
+        if list.is_empty() {
+            say(match lang {
+                Lang::En => "No pots yet; termbonsai plant plants the first tree.",
+                Lang::Ja => "まだ鉢がありません。termbonsai plantで最初の木を植えられます。",
+            })?;
+        }
+        for (pot, p) in &list {
+            let label = pot.clone().unwrap_or_else(|| match lang {
+                Lang::En => "(first)".to_string(),
+                Lang::Ja => "(最初の鉢)".to_string(),
+            });
+            let row = match load(p)? {
+                Load::Tree(s) => draw::line(&s.at(now), lang, false),
+                Load::Unreadable(e) => e,
+                Load::Missing => continue,
+            };
+            say(&format!("{label:<12} {row}"))?;
+        }
+        return Ok(ExitCode::SUCCESS);
+    }
+
+    if a.command == "water" && a.all {
+        let list = pots(&base_path(&a)?)?;
+        if list.is_empty() {
+            return Err(match lang {
+                Lang::En => "there is no bonsai yet; termbonsai plant plants one".to_string(),
+                Lang::Ja => "まだ盆栽がありません。termbonsai plantで植えられます".to_string(),
+            });
+        }
+        // Every pot gets its turn; a pot that fails is reported and the run
+        // ends with status 2 after the others.
+        let mut failed = false;
+        for (pot, p) in &list {
+            let label = pot
+                .as_deref()
+                .map(|n| format!("[{n}] "))
+                .unwrap_or_default();
+            let attempt = (|| -> Result<Option<String>, String> {
+                let _lock = Lock::take(p)?;
+                let mut s = match load(p)? {
+                    Load::Tree(s) => s,
+                    Load::Unreadable(e) => return Err(e),
+                    Load::Missing => return Ok(None),
+                };
+                let result = s.water(now);
+                save(p, &s)?;
+                Ok(Some(watered_message(result, &s.name, lang)))
+            })();
+            match attempt {
+                Ok(Some(msg)) => say(&format!("{label}{msg}"))?,
+                Ok(None) => {}
+                Err(e) => {
+                    eprintln!("termbonsai: {label}{e}");
+                    failed = true;
+                }
+            }
+        }
+        return Ok(if failed {
+            ExitCode::from(2)
+        } else {
+            ExitCode::SUCCESS
+        });
+    }
+
+    if a.command == "prune" {
+        let _lock = Lock::take(&path)?;
+        let mut s = match load(&path)? {
+            Load::Tree(s) => s,
+            Load::Unreadable(e) => return Err(e),
+            Load::Missing => {
+                return Err(match lang {
+                    Lang::En => "there is no bonsai yet; termbonsai plant plants one".to_string(),
+                    Lang::Ja => "まだ盆栽がありません。termbonsai plantで植えられます".to_string(),
+                })
+            }
+        };
+        let parts = tree::grow_species(s.seed, s.species);
+        let result = s.prune(now, &parts);
+        if let Pruned::Done(_) = result {
+            save(&path, &s)?;
+        }
+        say(&match (result, lang) {
+            (Pruned::Done(n), Lang::En) => format!(
+                "You prune {}: {n} shoot{} and leaves cut back. It keeps growing inside the new shape.",
+                s.name,
+                if n == 1 { "" } else { "s" }
+            ),
+            (Pruned::Done(n), Lang::Ja) => format!(
+                "{}を剪定しました。{n}か所を切り戻しました。この形の中で育ち続けます。",
+                s.name
+            ),
+            (Pruned::TooSoon(h), Lang::En) => format!(
+                "{} was pruned recently; let it recover for another {h} hour{}.",
+                s.name,
+                if h == 1 { "" } else { "s" }
+            ),
+            (Pruned::TooSoon(h), Lang::Ja) => format!(
+                "{}は剪定したばかりです。あと{h}時間ほど休ませてください。",
+                s.name
+            ),
+            (Pruned::NotHealthy(Health::Dead), Lang::En) => {
+                format!("{} has died; there is nothing to prune.", s.name)
+            }
+            (Pruned::NotHealthy(Health::Dead), Lang::Ja) => {
+                format!("{}は枯れてしまいました。剪定はできません。", s.name)
+            }
+            (Pruned::NotHealthy(_), Lang::En) => format!(
+                "{} is too dry to prune; water it, and prune once it is growing again.",
+                s.name
+            ),
+            (Pruned::NotHealthy(_), Lang::Ja) => format!(
+                "{}は乾きすぎていて剪定できません。水をやり、また育ち始めてから剪定してください。",
+                s.name
+            ),
+            (Pruned::NothingToCut, Lang::En) => format!(
+                "{} has nothing to cut back yet; let it grow out first.",
+                s.name
+            ),
+            (Pruned::NothingToCut, Lang::Ja) => {
+                format!("{}にはまだ切る枝がありません。もう少し育ててから。", s.name)
+            }
+        })?;
+        return Ok(match result {
+            Pruned::Done(_) => ExitCode::SUCCESS,
+            _ => ExitCode::from(1),
+        });
+    }
+
     if a.command == "water" {
         let _lock = Lock::take(&path)?;
         let mut s = match load(&path)? {
@@ -492,23 +777,7 @@ fn run(a: Args) -> Result<ExitCode, String> {
         };
         let result = s.water(now);
         save(&path, &s)?;
-        say(&match (result, lang) {
-            (Watered::Done, Lang::En) => format!("You water {}. The soil is wet again.", s.name),
-            (Watered::Done, Lang::Ja) => format!("{}に水をやりました。土が湿りました。", s.name),
-            (Watered::AlreadyMoist, Lang::En) => {
-                format!("{}'s soil is still moist; no need yet.", s.name)
-            }
-            (Watered::AlreadyMoist, Lang::Ja) => {
-                format!("{}の土はまだ湿っています。今はまだ不要です。", s.name)
-            }
-            (Watered::Dead, Lang::En) => {
-                format!("{} has died. termbonsai plant starts a new one.", s.name)
-            }
-            (Watered::Dead, Lang::Ja) => format!(
-                "{}は枯れてしまいました。termbonsai plantで植え直せます。",
-                s.name
-            ),
-        })?;
+        say(&watered_message(result, &s.name, lang))?;
         return Ok(ExitCode::SUCCESS);
     }
 
@@ -561,7 +830,7 @@ fn run(a: Args) -> Result<ExitCode, String> {
     let season = a
         .season
         .unwrap_or_else(|| Season::of_month(state::month_of(view.updated_at), a.south));
-    let parts = tree::grow(view.seed);
+    let parts = tree::grow_species(view.seed, view.species);
     let full = tree::full_grown(&parts);
     let preview_note = match (fresh, lang) {
         (true, Lang::En) => "\n(a preview of a tree not yet planted; nothing was saved)",
@@ -585,7 +854,16 @@ fn run(a: Args) -> Result<ExitCode, String> {
                 } else {
                     Health::Thriving
                 };
-                let pic = draw::picture(&parts, g, season, health, a.width, mode);
+                let pic = draw::picture_of(
+                    &parts,
+                    g,
+                    season,
+                    health,
+                    a.width,
+                    mode,
+                    view.species,
+                    view.trim,
+                );
                 if tty {
                     write!(out, "\x1b[H\x1b[2J").map_err(|e| e.to_string())?;
                 }
@@ -600,7 +878,16 @@ fn run(a: Args) -> Result<ExitCode, String> {
             writeln!(out, "\n{}", draw::status(&view, full, lang)).map_err(|e| e.to_string())?;
         }
         _ => {
-            let pic = draw::picture(&parts, view.growth, season, view.health(), a.width, mode);
+            let pic = draw::picture_of(
+                &parts,
+                view.growth,
+                season,
+                view.health(),
+                a.width,
+                mode,
+                view.species,
+                view.trim,
+            );
             let mut text = pic.join("\n");
             text.push_str("\n\n");
             text.push_str(&draw::status(&view, full, lang));
